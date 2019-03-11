@@ -1,0 +1,312 @@
+---
+title: "Boston Housing Data"
+author: "Varsha"
+date: "March 10, 2019"
+output:
+  word_document: default
+  html_document:
+    code_folding: show
+    gallery: no
+    highlight: tango
+    lightbox: yes
+    self_contained: yes
+---
+
+
+## Predicting Housing Price using Different Modelling Techniques {.tabset .tabset-fade}
+
+### Packages Required
+
+```{r message=FALSE, warning=FALSE}
+library(MASS)          #for obtaining Boston Housing Data
+library(rpart)         #for regression trees
+library(rpart.plot)    #for plotting regression trees
+library(ipred)         #for bagging
+library(randomForest)  #for random forest 
+library(dplyr)         #for manipulation
+library(gbm)           #for boosting
+library(tidyverse)     #for tidying the data
+library(kableExtra)    #for table presentation
+```
+
+
+### Linear Regression
+
+
+```{r}
+set.seed(2)
+sample_index <- sample(nrow(Boston),nrow(Boston)*0.75)
+boston_train <- Boston[sample_index,]
+boston_test <- Boston[-sample_index,]
+```
+
+
+I would like to predict the median value of owner-occupied homes, medv.
+Initially I look at how we can regress it on other predictor variables and use *Multiple Linear Regression* to predict the values.
+
+I have used combination of forward and backward stepwise variable selection method to find the best subsets of variables from 13 variables.
+
+The linear model gives me following varibales that are significant and help in explaining the variability in median housing value.
+
+
+```{r}
+##fitting linear regression 
+nullmodel=lm(medv~1, data=boston_train)
+fullmodel=lm(medv~., data=boston_train)
+
+#using AIC to find the best subsets of predictors 
+#using a combination of forward and backward stepwise variable selection 
+model_step_s <- step(nullmodel, scope=list(lower=nullmodel, 
+                                           upper=fullmodel), direction='both')
+(model_summary <- summary(model_step_s))
+```
+
+The in-sample MSE comes out to be `r round((model_summary$sigma)^2,3) `
+
+```{r}
+predicted_val <- predict(object = model_step_s, newdata = boston_test)
+lin_train_mse <- round((model_summary$sigma)^2,3) 
+lin_test_mse <- round(mean((predicted_val - boston_test$medv)^2),3)
+```
+
+The MSE for test data comes out to be `r round(mean((predicted_val - boston_test$medv)^2),3)`
+
+### Regression Trees
+
+I would try to further improve the accuracy using other modelling techniques and compare them on the basis of Root Mean Squared error. Let's look at *Regression Trees* first.
+
+```{r}
+boston_rpart <- rpart(formula = medv ~ ., data = boston_train, cp = 0.00001)
+plotcp(boston_rpart)
+printcp(boston_rpart)
+
+
+
+```
+
+The minimum cp value is `r boston_rpart$cptable[which.min(boston_rpart$cptable[,"xerror"]),"CP"]`
+
+####Building a pruned regression tree with cp value as 0.01
+
+```{r}
+boston_rpart <- rpart(formula = medv ~ ., data = boston_train, cp = 0.01)
+prp(boston_rpart,digits = 4, extra = 1)
+```
+
+
+```{r}
+
+boston_train_pred_tree = predict(boston_rpart)
+boston_test_pred_tree = predict(boston_rpart, boston_test)
+reg_train_mse <- round(mean((boston_train_pred_tree - boston_train$medv)^2),3) 
+reg_test_mse <- round(mean((boston_test_pred_tree - boston_test$medv)^2),3)
+```
+
+The in-sample MSE comes out to be: `r round(mean((boston_train_pred_tree - boston_train$medv)^2),3)  `
+Whereas, the test set MSE comes out to be: `r round(mean((boston_test_pred_tree - boston_test$medv)^2),3)`
+
+Linear regression models fail in situations where the relationship between features and outcome is nonlinear or where features interact with each other. 
+
+### Bagging
+
+Next, I will use use *Bagging* which is a general approach that uses bootstrapping in conjunction with any regression model to construct an ensemble. 
+
+Bagging models provide several advantages over models that are not bagged.
+First, bagging eﬀectively reduces the variance of a prediction through its aggregation process. For models that produce an unstable prediction, like regression trees, aggregating over many versions of the training data actually reduces the variance in the prediction and, hence, makes the prediction more stable. 
+
+####Selecting optimal number of trees that minimizes the out-of-bag error
+
+
+```{r}
+ntree<- c(seq(10, 200, 10))
+oob_error<- rep(0, length(ntree))
+for(i in 1:length(ntree)){
+  set.seed(2)
+  boston.bag<- bagging(medv~., data = boston_train, nbagg=ntree[i])
+  oob_error[i] <- bagging(medv~., data = boston_train, nbagg=ntree[i], coob=T)$err
+}
+plot(ntree, oob_error, type = 'l', col=2, lwd=2, xaxt="n")
+axis(1, at = ntree, las=1)
+```
+
+Building the final model with 70 trees
+
+```{r}
+boston_bag<- bagging(medv~., data = boston_train, nbagg= 70)
+boston_train_bag_tree = predict(boston_bag)
+boston_bag_pred<- predict(boston_bag, newdata = boston_test)
+boston_bag_oob<- bagging(medv~., data = boston_train, coob=T, nbagg= 70)
+
+bag_train_mse <- round(mean((boston_train_bag_tree - boston_train$medv)^2),3)
+bag_test_mse <- round(mean((boston_test$medv-boston_bag_pred)^2),3)
+```
+
+The in-sample MSE comes out to be - `r round(mean((boston_train_bag_tree - boston_train$medv)^2),3)`
+Whereas the test-set MSE comes out to be - `r round(mean((boston_test$medv-boston_bag_pred)^2),3)`
+
+Thus, when compared to a single regression tree, the MSE has significantly reduced.
+
+Another advantage of bagging models is that they can provide their own internal estimate of predictive performance that correlates well with either cross-validation estimates or test set estimates. Thus the OOB estimate, which is the root mean squared error value obtained is - 
+`r round(boston_bag_oob$err,3)`
+
+
+### Random Forest 
+
+The trees in bagging, are not completely independent of each other since all of the original predictors are considered at every split of every tree.  Reducing correlation among trees, known as de-correlating trees, is then the next logical step to improving the performance of bagging. Thus, we use *Random Forest* where trees are built using a random subset of the top k predictors at each split in the tree. 
+
+By default, k = P/3.
+
+```{r}
+boston_rf<- randomForest(medv~., data = boston_train, importance=TRUE)
+boston_rf_train<- predict(boston_rf)
+boston_rf_pred<- predict(boston_rf, boston_test)
+#boston_rf
+```
+
+we can see the important variables - 
+```{r}
+boston_rf$importance 
+```
+
+We can further see the OOB Error which is MSE for every size of tree considered. We observe that the error is stabilized around 300 trees.
+
+```{r}
+plot(boston_rf$mse, type='l', col=2, lwd=2, xlab = "ntree", ylab = "OOB Error")
+```
+
+
+We can also compare the test set error with the OOB error. 
+
+```{r}
+oob.err<- rep(0, 13)
+test.err<- rep(0, 13)
+for(i in 1:13){
+  fit<- randomForest(medv~., data = boston_train, mtry=i)
+  oob.err[i]<- fit$mse[500]
+  test.err[i]<- mean((boston_test$medv-predict(fit, boston_test))^2)
+  cat(i, " ")
+}
+
+matplot(cbind(test.err, oob.err), pch=15, col = c("red", "blue"), 
+        type = "b", ylab = "MSE", xlab = "mtry")
+legend("topright", legend = c("test Error", "OOB Error"),
+       pch = 15, col = c("red", "blue"))
+
+```
+
+The optimal subset of predictor variables that should be used by each tree is approximately 6.
+
+Final tree after obtaining the tuned parameters- 
+
+```{r}
+boston_rf<- randomForest(medv~., data = boston_train, importance=TRUE, ntree = 300, mtry = 6)
+boston_rf_train<- predict(boston_rf)
+boston_rf_pred<- predict(boston_rf, boston_test)
+
+rf_train_mse <- round(mean((boston_train$medv-boston_rf_train)^2),3)
+rf_test_mse <- round(mean((boston_test$medv-boston_rf_pred)^2),3)
+```
+
+The MSE of training sample comes out to be: `r round(mean((boston_train$medv-boston_rf_train)^2),3)`
+The MSE on the test sample comes out to be: `r round(mean((boston_test$medv-boston_rf_pred)^2),3)`
+
+The minimum OOB error comes out to be: `r round(min(test.err),3)`
+
+### Boosting
+
+so, with *Random Forest*, a set of independent trees are grown and then a strong ensemble is formed. While it is a great technique to improve the model prediction performance, there is another great technique known as *Boosting*.  Boosting works in a similar way, except that the trees are grown sequentially: each tree is grown using information from previously grown trees. Boosting does not involve bootstrap sampling; instead each tree is ﬁt on a modiﬁed version of the original data set. 
+
+The motivation for boosting was a procedure that combines the outputs of many “weak” classiﬁers to produce a powerful “committee.” 
+
+```{r}
+boston.boost<- gbm(medv~., data = boston_train, distribution = "gaussian",
+                   n.trees = 10000, shrinkage = 0.01, interaction.depth = 8)
+summary(boston.boost)
+```
+We observe that `lstat` is the most important variable here.
+
+
+We can also visualize how the testing error changes with different number of trees.
+
+```{r}
+ntree<- seq(100, 10000, 100)
+predmat<- predict(boston.boost, newdata = boston_test, n.trees = ntree)
+err<- apply((predmat-boston_test$medv)^2, 2, mean)
+plot(ntree, err, type = 'l', col=2, lwd=2, xlab = "n.trees", ylab = "Test MSE")
+abline(h=min(err), lty=2)
+```
+
+
+```{r}
+boston.boost<- gbm(medv~., data = boston_train, distribution = "gaussian",
+                   n.trees = 2000, shrinkage = 0.01, interaction.depth = 8)
+summary(boston.boost)
+boston.boost.pred.train <- predict(boston.boost,  n.trees = 2000)
+boston.boost.pred.test <- predict(boston.boost, boston_test, n.trees = 2000)
+
+boost_train_mse <- round(mean((boston_train$medv-boston.boost.pred.train)^2),3) 
+boost_test_mse <- round(mean((boston_test$medv-boston.boost.pred.test)^2),3)
+```
+
+- The training set MSE comes out to be: `r round(mean((boston_train$medv-boston.boost.pred.train)^2),3)`.
+
+- The test-set MSE in this case comes out to be: `r round(mean((boston_test$medv-boston.boost.pred.test)^2),3)`
+
+However, gradient boosting machine could be susceptible to over-ﬁtting, since the learner employed—even in its weakly deﬁned learning capacity—is tasked with optimally ﬁtting the gradient. This means that boosting will select the optimal learner at each stage of the algorithm. Despite using weak learners, boosting still employs the greedy strategy of choosing the optimal weak learner at each stage. Although this strategy generates an optimal solution at the current stage, it has the drawbacks of not ﬁnding the optimal global model as well as over-ﬁtting the training data.
+
+There are further improvements that can be made upon boosting mechanism. 
+
+
+### Executive Summary 
+
+**Linear Regression**
+
+At first, I used simple linear regression to predict the variable. I have performed variable selective using step-wise method and used AIC as the measure of variable selection. 
+
+**Decision Trees**
+
+Trees were created using CART to improve the accuracy of prediction. They are best suited when the relationship between the variables are non-linear.
+
+**Bagging**
+
+While decision trees are easy to interpret, they sometimes cause overfitting. If we try to reduce overfitting (low bias high variance), prediction accuracy is compromised. To improve the prediction accuracy, we use Bootstrap Aggregating, where we bootstrap multiple samples and use them as an ensemble. This thereby helps in reducing the variance. 
+
+**Random Forest**
+
+Bagging helps in reducing variance but since the bootstrap samples are very highly correlated, variance isn’t reduced much. Random Forest provides further improvement by taking a set of de-correlated trees to form ensembles. This helps in reducing variance significantly over Bagging.
+
+**Boosting**
+
+Boosting is another technique where unlike Random Forests and Bagging, where a set of independent trees are used as an ensemble, boosting models and tries to improve over the existing trees. It models on the residuals of the previously fit trees and tries to improve the accuracy thereby. This method provides us better prediction performance over any other technique.
+
+
+
+```{r}
+model = factor(c("Linear Regression", "Decision Tree", "Bagging", 
+              "Random Forest", "Boosting"),
+              levels=c("Linear Regression", "Decision Tree", "Bagging", 
+                       "Random Forest", "Boosting"))
+
+train_mse <- c(lin_train_mse,
+               reg_train_mse,
+               bag_train_mse,
+               rf_train_mse,
+               boost_train_mse)
+
+test_mse <- c(lin_test_mse,
+               reg_test_mse,
+               bag_test_mse,
+               rf_test_mse,
+               boost_test_mse)
+
+table <- data.frame(model=model,
+                                train_mse = train_mse,
+                               test_mse = test_mse)
+
+
+kable(table)
+```
+
+
+
+Thus, we see that the prediction accuracy on the test-set continues to improve as we model using slightly better technique than the previous model and minimum MSE is obtained for Boosting followed by Random Forest and then by Bagging. 
